@@ -1,0 +1,157 @@
+#!/usr/bin/env node
+/**
+ * This file is just a helper to compile all examples.
+ *
+ * You could do the same by going into each example and execute
+ * `webpack`
+ */
+const fs = require('fs');
+const path = require('path');
+const rimraf = require('rimraf');
+const webpack = require('webpack');
+const ExtractTextPlugin = require('extract-text-webpack-plugin');
+const Clout = require('clout-js/lib/Clout.js');
+const Arghandle = require('arghandle');
+const handle = new Arghandle({ argv: process.argv });
+const webpackDevServer = require('webpack-dev-server');
+const opn = require('opn');
+
+let appConfig = {
+	watch: false,
+	examplesDirectory: path.resolve(__dirname, '../examples')
+};
+let clout;
+
+handle.concat([
+    {
+        keys: ['--watch', '-W'],
+        method: () => appConfig.watch = true,
+        description: 'Watch files'
+    },
+    {
+        keys: ['--examples-directory', '-DIR'],
+        method: function (self) {
+            appConfig.examplesDirectory = self.getNext();
+        },
+        description: 'Set application to debug'
+    },
+]);
+handle.process();
+
+const examples = fs.readdirSync(appConfig.examplesDirectory)
+	.filter((fileName) => {
+		return fs.statSync(path.join(appConfig.examplesDirectory, fileName)).isDirectory()
+	})
+	.map((fileName) => {
+		let examplePath = path.join(appConfig.examplesDirectory, fileName);
+		let exampleWebpackConfigFilePath = path.join(examplePath, 'webpack.config');
+		let exampleWebpackConfig = require(exampleWebpackConfigFilePath);
+
+		return {
+			name: fileName,
+			webpackConfig: exampleWebpackConfig
+		};
+	});
+
+/**
+ * run webpack using webpack.config
+ * @param  {object} webpackConfig webpack configuration file
+ * @param  {[type]} name          application name
+ */
+module.exports.buildWebpackExample = function buildWebpackExample(webpackConfig, name) {
+	let webpackOutputPath = webpackConfig.output.path;
+	let webpackInstance;
+
+	// remove output folder
+	rimraf.sync(webpackOutputPath);
+
+	if (appConfig.watch) {
+		webpackConfig.watch = true;
+	}
+
+	console.info(`[webpack-base] ${webpackConfig.watch ? 'watching' : 'building'} application ${name}`);
+	webpackInstance = webpack(webpackConfig, function (err, stats) {
+		if (err) {
+			console.error(err.stack || err);
+			if (err.details) {
+				console.error(err.details);
+			}
+			return;
+		}
+
+		let info = stats.toJson();
+
+		if (stats.hasErrors()) {
+			console.error(info.errors);
+		}
+
+		if (stats.hasWarnings()) {
+			console.warn(info.warnings);
+		}
+	});
+
+	// run webpack
+	if (appConfig.watch) {
+		let isFirstRun = !clout;
+		let webpackDevServerInstance = new webpackDevServer(webpackInstance.compiler, {
+			hot: true
+		});
+
+		if (!clout) {
+			clout = new Clout(path.join(__dirname, '..'));
+		}
+
+		clout.registerHook('start', function () {
+			if (name === 'webpack-base') {
+				this.app.use(webpackDevServerInstance.app);
+			} else {
+				this.app.use(`/${name}/`, webpackDevServerInstance.app);
+			}
+		}, 20);
+
+		
+
+		if (isFirstRun) {
+			let hostname = 'localhost';
+
+			clout.config.http = {
+				port: 8080
+			};
+
+			clout.on('started', () => {
+				if (clout.server.https) {
+					console.info('server listing on %s', `https://${hostname}:${clout.server.https.address().port}`);
+				}
+				if (clout.server.http) {
+					console.info('server listing on %s', `http://${hostname}:${clout.server.http.address().port}`);
+				}
+
+				opn(`http://${hostname}:${clout.server.http.address().port}`);
+			});
+
+			setTimeout(() => clout.start(), 1000);
+		}
+	}
+};
+
+module.exports.getAvailablePort = function getAvailablePort() {
+	return 8080;
+};
+
+// build base
+let baseWebpackConfig = require('..');
+let injectedBaseConfig = baseWebpackConfig.extend({
+	plugins: [
+		...baseWebpackConfig.plugins, // bugfix until extend is refined
+		new webpack.DefinePlugin({
+		    examples: JSON.stringify(examples)
+		})
+	]
+});
+
+module.exports.buildWebpackExample(injectedBaseConfig, 'webpack-base');
+
+// build examples
+examples.forEach(function (exampleMetadata) {
+	module.exports.buildWebpackExample(exampleMetadata.webpackConfig, exampleMetadata.name);
+});
